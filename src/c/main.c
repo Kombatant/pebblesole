@@ -433,7 +433,7 @@ static void draw_seconds_badge(GContext *ctx) {
   GRect badge = GRect(157, 78, 34, 28);
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_rect(ctx, badge, 8, GCornersAll);
-  graphics_context_set_stroke_color(ctx, GColorLightGray);
+  graphics_context_set_stroke_color(ctx, accent_color());
   graphics_context_set_stroke_width(ctx, 2);
   graphics_draw_round_rect(ctx, badge, 8);
   graphics_context_set_text_color(ctx, GColorLightGray);
