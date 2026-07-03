@@ -116,9 +116,10 @@ static const uint32_t s_backlight_rgb[BacklightColorCount] = {
   0x00FF00    // BacklightGreen
 };
 
-// Big-time text colour tracks the backlight colour so the face matches the
-// glow at night. System Default keeps the face's own red accent.
-static GColor time_color(void) {
+// Face accent colour tracks the backlight colour so the face matches the
+// glow at night: big time, hour ticks, gauges, BT + quiet-time icons.
+// System Default keeps the face's own red accent.
+static GColor accent_color(void) {
   if (s_backlight_color == BacklightSystem) return GColorRed;
   uint32_t rgb = s_backlight_rgb[s_backlight_color];
   return GColorFromRGB((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
@@ -215,7 +216,7 @@ static void draw_metric_gauge(GContext *ctx, int x, int y, int w, int fill_pct) 
   if (fill_pct < 0) fill_pct = 0;
   if (fill_pct > 100) fill_pct = 100;
 
-  graphics_context_set_stroke_color(ctx, GColorRed);
+  graphics_context_set_stroke_color(ctx, accent_color());
   graphics_context_set_stroke_width(ctx, 1);
   const int dash = 5, gap = 3;
   for (int dx = 0; dx < w; dx += dash + gap) {
@@ -287,7 +288,9 @@ static void draw_tick_ring(GContext *ctx, GRect b) {
     int x1 = x0 + dx * len / mag;
     int y1 = y0 + dy * len / mag;
 
-    graphics_context_set_stroke_color(ctx, (i % 5 == 0) ? GColorWhite : GColorLightGray);
+    // Hour ticks take the accent colour; minute ticks stay dim gray so the
+    // hour positions keep visual hierarchy.
+    graphics_context_set_stroke_color(ctx, (i % 5 == 0) ? accent_color() : GColorLightGray);
     graphics_context_set_stroke_width(ctx, 1);
     graphics_draw_line(ctx, GPoint(x0, y0), GPoint(x1, y1));
   }
@@ -296,7 +299,7 @@ static void draw_tick_ring(GContext *ctx, GRect b) {
 // --- small vector glyphs (white), ~18px box at (x,y) top-left ---
 
 static void glyph_bt(GContext *ctx, int x, int y) {
-  graphics_context_set_stroke_color(ctx, GColorPictonBlue);
+  graphics_context_set_stroke_color(ctx, accent_color());
   graphics_context_set_stroke_width(ctx, 1);
   GPoint top = GPoint(x + 6, y);
   GPoint bot = GPoint(x + 6, y + 16);
@@ -310,14 +313,14 @@ static void glyph_bt(GContext *ctx, int x, int y) {
 // Crescent moon for Quiet Time: filled disc with an offset background-colored
 // disc carving out the crescent (same trick as pebble-inimal's moon icons).
 static void glyph_moon(GContext *ctx, int x, int y) {
-  graphics_context_set_fill_color(ctx, GColorLightGray);
+  graphics_context_set_fill_color(ctx, accent_color());
   graphics_fill_circle(ctx, GPoint(x + 6, y + 8), 6);
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_circle(ctx, GPoint(x + 9, y + 6), 6);
 }
 
 static void glyph_bolt(GContext *ctx, int x, int y) {
-  graphics_context_set_fill_color(ctx, GColorLightGray);
+  graphics_context_set_fill_color(ctx, accent_color());
   GPathInfo info = {
     .num_points = 6,
     .points = (GPoint[]){ {x + 7, y}, {x + 5, y + 7}, {x + 10, y + 7},
@@ -452,7 +455,7 @@ static void canvas_update(Layer *layer, GContext *ctx) {
   draw_date(ctx, b);
 
   // Gauge 1: battery (dot near right when full)
-  draw_dashed_gauge(ctx, 62, 48, 78, s_batt_pct, GColorRed);
+  draw_dashed_gauge(ctx, 62, 48, 78, s_batt_pct, accent_color());
 
   // Status row: BT + quiet-time moon + charging bolt + battery %, centered
   // as a group
@@ -490,7 +493,7 @@ static void canvas_update(Layer *layer, GContext *ctx) {
 
   // Big time: one centered system numeric font line for a cleaner face.
   // Colour follows the configured backlight colour.
-  graphics_context_set_text_color(ctx, time_color());
+  graphics_context_set_text_color(ctx, accent_color());
   graphics_draw_text(ctx, s_time_buf, s_font_time, GRect(14, 62, 160, 78),
                      GTextOverflowModeFill, GTextAlignmentCenter, NULL);
 
