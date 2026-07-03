@@ -1,0 +1,57 @@
+{
+  "name": "pebblesole",
+  "author": "Kombatant",
+  "version": "0.3.1",
+  "keywords": ["pebble-app"],
+  "private": true,
+  "dependencies": {
+    "pebble-clay": "^1.0.4"
+  },
+  "pebble": {
+    "displayName": "Pebblesole",
+    "uuid": "68280375-a604-44f4-9181-b986d8d398c2",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": [
+      "emery"
+    ],
+    "watchapp": {
+      "watchface": true
+    },
+    "capabilities": [
+      "location",
+      "configurable"
+    ],
+    "messageKeys": [
+      "TEMP",
+      "ICON",
+      "REQUEST_WEATHER",
+      "TEMP_UNITS",
+      "NIGHT_MODE_ENABLED",
+      "NIGHT_START_HOUR",
+      "NIGHT_END_HOUR",
+      "NIGHT_UPDATE_INTERVAL",
+      "WEATHER_INTERVAL",
+      "BACKLIGHT_COLOR",
+      "REQUEST_BATTERY_INFO",
+      "BATTERY_ESTIMATE",
+      "BATTERY_SINCE_CHARGE",
+      "BATTERY_RATE_MILLI"
+    ],
+    "resources": {
+      "media": [
+        { "type": "bitmap", "name": "WX_CLEAR",   "file": "images/wx_clear.png" },
+        { "type": "bitmap", "name": "WX_CLOUDS",  "file": "images/wx_clouds.png" },
+        { "type": "bitmap", "name": "WX_RAIN",    "file": "images/wx_rain.png" },
+        { "type": "bitmap", "name": "WX_SNOW",    "file": "images/wx_snow.png" },
+        { "type": "bitmap", "name": "WX_THUNDER", "file": "images/wx_thunder.png" },
+        { "type": "bitmap", "name": "WX_FOG",     "file": "images/wx_fog.png" },
+        { "type": "bitmap", "name": "STATUS_BT_OFF", "file": "images/status_bluetooth_off.png" },
+        { "type": "font", "name": "FONT_RAJDHANI_BOLD_66", "file": "fonts/Rajdhani-Bold.ttf", "characterRegex": "[0-9:]" },
+        { "type": "font", "name": "FONT_KHAND_MEDIUM_24", "file": "fonts/Khand-Medium.ttf", "characterRegex": "[0-9%° .-]" },
+        { "type": "font", "name": "FONT_KHAND_MEDIUM_20", "file": "fonts/Khand-Medium.ttf", "characterRegex": "[0-9km° .-]" },
+        { "type": "font", "name": "FONT_KHAND_REGULAR_18", "file": "fonts/Khand-Regular.ttf", "characterRegex": "[0-9A-Z ]" }
+      ]
+    }
+  }
+}
