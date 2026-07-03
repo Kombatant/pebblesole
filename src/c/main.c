@@ -118,11 +118,68 @@ static const uint32_t s_backlight_rgb[BacklightColorCount] = {
 
 // Face accent colour tracks the backlight colour so the face matches the
 // glow at night: big time, hour ticks, gauges, BT + quiet-time icons.
-// System Default keeps the face's own red accent.
+// System Default keeps the face's own red accent. Cached — recomputed only
+// when the backlight setting changes, not on every draw call.
+static GColor s_accent_color;
+
+// Recolor the BT-off bitmap to the accent colour (preserving alpha) so it
+// matches the accent vector glyphs. Handles both palettized formats (recolor
+// the palette) and 8-bit ARGB (rewrite pixel bytes — what the SDK emits for
+// this antialiased grayscale+alpha PNG). Re-run whenever the accent changes.
+static void tint_bt_off_bitmap(void) {
+  if (!s_status_bt_off) return;
+
+  GColor *pal = gbitmap_get_palette(s_status_bt_off);
+  if (pal) {
+    int n;
+    switch (gbitmap_get_format(s_status_bt_off)) {
+      case GBitmapFormat1BitPalette: n = 2; break;
+      case GBitmapFormat2BitPalette: n = 4; break;
+      case GBitmapFormat4BitPalette: n = 16; break;
+      default: return;
+    }
+    for (int i = 0; i < n; i++) {
+      if (pal[i].a != 0) {
+        pal[i].r = s_accent_color.r;
+        pal[i].g = s_accent_color.g;
+        pal[i].b = s_accent_color.b;
+      }
+    }
+    return;
+  }
+
+  if (gbitmap_get_format(s_status_bt_off) == GBitmapFormat8Bit) {
+    GRect bounds = gbitmap_get_bounds(s_status_bt_off);
+    uint8_t *data = gbitmap_get_data(s_status_bt_off);
+    uint16_t stride = gbitmap_get_bytes_per_row(s_status_bt_off);
+    if (!data) return;
+    for (int y = 0; y < bounds.size.h; y++) {
+      uint8_t *row = data + y * stride;
+      for (int x = 0; x < bounds.size.w; x++) {
+        GColor c = (GColor){ .argb = row[x] };
+        if (c.a != 0) {
+          c.r = s_accent_color.r;
+          c.g = s_accent_color.g;
+          c.b = s_accent_color.b;
+          row[x] = c.argb;
+        }
+      }
+    }
+  }
+}
+
+static void refresh_accent_color(void) {
+  if (s_backlight_color == BacklightSystem) {
+    s_accent_color = GColorRed;
+  } else {
+    uint32_t rgb = s_backlight_rgb[s_backlight_color];
+    s_accent_color = GColorFromRGB((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+  }
+  tint_bt_off_bitmap();
+}
+
 static GColor accent_color(void) {
-  if (s_backlight_color == BacklightSystem) return GColorRed;
-  uint32_t rgb = s_backlight_rgb[s_backlight_color];
-  return GColorFromRGB((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+  return s_accent_color;
 }
 
 // Apply the configured backlight colour. The override only lasts while the
@@ -234,9 +291,15 @@ static void draw_metric_gauge(GContext *ctx, int x, int y, int w, int fill_pct) 
 }
 
 // Tick marks around an inset rounded rectangle with consistent perimeter spacing.
-static void draw_tick_ring(GContext *ctx, GRect b) {
-  graphics_context_set_stroke_color(ctx, GColorLightGray);
+// Geometry depends only on the layer bounds, so the 60 segments (trig + isqrt
+// per tick) are computed once at window load instead of on every frame.
+typedef struct {
+  GPoint p0;
+  GPoint p1;
+} TickSeg;
+static TickSeg s_ticks[60];
 
+static void compute_tick_ring(GRect b) {
   const int left = 10;
   const int top = 10;
   const int right = b.size.w - 10;
@@ -285,14 +348,24 @@ static void draw_tick_ring(GContext *ctx, GRect b) {
 
     int mag = isqrt64((int64_t)dx * dx + (int64_t)dy * dy);
     if (!mag) { mag = 1; }
-    int x1 = x0 + dx * len / mag;
-    int y1 = y0 + dy * len / mag;
+    s_ticks[i].p0 = GPoint(x0, y0);
+    s_ticks[i].p1 = GPoint(x0 + dx * len / mag, y0 + dy * len / mag);
+  }
+}
 
-    // Hour ticks take the accent colour; minute ticks stay dim gray so the
-    // hour positions keep visual hierarchy.
-    graphics_context_set_stroke_color(ctx, (i % 5 == 0) ? accent_color() : GColorLightGray);
-    graphics_context_set_stroke_width(ctx, 1);
-    graphics_draw_line(ctx, GPoint(x0, y0), GPoint(x1, y1));
+// Hour ticks take the accent colour; minute ticks stay dim gray so the
+// hour positions keep visual hierarchy. Two passes avoid a per-tick
+// stroke-color switch.
+static void draw_tick_ring(GContext *ctx) {
+  graphics_context_set_stroke_width(ctx, 1);
+  graphics_context_set_stroke_color(ctx, GColorLightGray);
+  for (int i = 0; i < 60; i++) {
+    if (i % 5 == 0) continue;
+    graphics_draw_line(ctx, s_ticks[i].p0, s_ticks[i].p1);
+  }
+  graphics_context_set_stroke_color(ctx, accent_color());
+  for (int i = 0; i < 60; i += 5) {
+    graphics_draw_line(ctx, s_ticks[i].p0, s_ticks[i].p1);
   }
 }
 
@@ -319,16 +392,28 @@ static void glyph_moon(GContext *ctx, int x, int y) {
   graphics_fill_circle(ctx, GPoint(x + 9, y + 6), 6);
 }
 
+// Glyph paths are created once at window load and translated with
+// gpath_move_to per draw — avoids a heap alloc/free per glyph per frame.
+static const GPathInfo BOLT_PATH_INFO = {
+  .num_points = 6,
+  .points = (GPoint[]){ {7, 0}, {5, 7}, {10, 7}, {3, 16}, {5, 9}, {0, 9} }
+};
+static const GPathInfo PIN_PATH_INFO = {
+  .num_points = 3,
+  .points = (GPoint[]){ {3, 7}, {9, 7}, {6, 13} }
+};
+static const GPathInfo HEART_PATH_INFO = {
+  .num_points = 3,
+  .points = (GPoint[]){ {1, 5}, {12, 5}, {6, 13} }
+};
+static GPath *s_path_bolt;
+static GPath *s_path_pin;
+static GPath *s_path_heart;
+
 static void glyph_bolt(GContext *ctx, int x, int y) {
   graphics_context_set_fill_color(ctx, accent_color());
-  GPathInfo info = {
-    .num_points = 6,
-    .points = (GPoint[]){ {x + 7, y}, {x + 5, y + 7}, {x + 10, y + 7},
-                          {x + 3, y + 16}, {x + 5, y + 9}, {x + 0, y + 9} }
-  };
-  GPath *p = gpath_create(&info);
-  gpath_draw_filled(ctx, p);
-  gpath_destroy(p);
+  gpath_move_to(s_path_bolt, GPoint(x, y));
+  gpath_draw_filled(ctx, s_path_bolt);
 }
 
 static void draw_status_bitmap(GContext *ctx, GBitmap *bitmap, GRect rect) {
@@ -343,13 +428,8 @@ static void glyph_pin(GContext *ctx, int x, int y) {
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_circle(ctx, GPoint(x + 6, y + 4), 2);
   graphics_context_set_fill_color(ctx, GColorLightGray);
-  GPathInfo info = {
-    .num_points = 3,
-    .points = (GPoint[]){ {x + 3, y + 7}, {x + 9, y + 7}, {x + 6, y + 13} }
-  };
-  GPath *p = gpath_create(&info);
-  gpath_draw_filled(ctx, p);
-  gpath_destroy(p);
+  gpath_move_to(s_path_pin, GPoint(x, y));
+  gpath_draw_filled(ctx, s_path_pin);
 }
 
 static void glyph_runner(GContext *ctx, int x, int y) {
@@ -369,13 +449,8 @@ static void glyph_heart(GContext *ctx, int x, int y) {
   graphics_context_set_fill_color(ctx, GColorLightGray);
   graphics_fill_circle(ctx, GPoint(x + 4, y + 4), 3);
   graphics_fill_circle(ctx, GPoint(x + 9, y + 4), 3);
-  GPathInfo info = {
-    .num_points = 3,
-    .points = (GPoint[]){ {x + 1, y + 5}, {x + 12, y + 5}, {x + 6, y + 13} }
-  };
-  GPath *p = gpath_create(&info);
-  gpath_draw_filled(ctx, p);
-  gpath_destroy(p);
+  gpath_move_to(s_path_heart, GPoint(x, y));
+  gpath_draw_filled(ctx, s_path_heart);
 }
 
 // =====================================================================
@@ -385,6 +460,14 @@ static int text_w(const char *s, GFont f) {
   return graphics_text_layout_get_content_size(
       s, f, GRect(0, 0, 200, 90), GTextOverflowModeFill, GTextAlignmentLeft).w;
 }
+
+// Cached text widths — text measurement walks the font layout engine, so
+// widths are recomputed only when their string changes (-1 = stale). Measured
+// lazily inside the render pass, which guarantees fonts are loaded.
+static int s_w_wday = -1;
+static int s_w_mday = -1;
+static int s_w_mon  = -1;
+static int s_w_batt = -1;
 
 static int32_t isqrt64(int64_t x) {
   int64_t op = x;
@@ -406,9 +489,14 @@ static int32_t isqrt64(int64_t x) {
 // centered as a group. Mimics "MONDAY 12 JANUARY".
 static void draw_date(GContext *ctx, GRect b) {
   const int gap = 6;
-  int w_wday = text_w(s_wday_buf, s_font_sm);
-  int w_mday = text_w(s_mday_buf, s_font_rc);
-  int w_mon  = text_w(s_mon_buf, s_font_sm);
+  if (s_w_wday < 0) {
+    s_w_wday = text_w(s_wday_buf, s_font_sm);
+    s_w_mday = text_w(s_mday_buf, s_font_rc);
+    s_w_mon  = text_w(s_mon_buf, s_font_sm);
+  }
+  int w_wday = s_w_wday;
+  int w_mday = s_w_mday;
+  int w_mon  = s_w_mon;
   int total = w_wday + gap + w_mday + gap + w_mon;
   int x = (b.size.w - total) / 2;
   int y_small = 23;
@@ -427,18 +515,21 @@ static void draw_date(GContext *ctx, GRect b) {
                      GTextOverflowModeFill, GTextAlignmentLeft, NULL);
 }
 
-static void draw_seconds_badge(GContext *ctx) {
-  if (!s_active) return;
+// Seconds badge lives on its own small layer so the per-second ticks in
+// active mode repaint only these 34x28 pixels instead of the whole face.
+#define BADGE_FRAME GRect(157, 78, 34, 28)
+static Layer *s_badge_layer;
 
-  GRect badge = GRect(157, 78, 34, 28);
+static void badge_update(Layer *layer, GContext *ctx) {
+  GRect b = layer_get_bounds(layer);
   graphics_context_set_fill_color(ctx, GColorBlack);
-  graphics_fill_rect(ctx, badge, 8, GCornersAll);
+  graphics_fill_rect(ctx, b, 8, GCornersAll);
   graphics_context_set_stroke_color(ctx, accent_color());
   graphics_context_set_stroke_width(ctx, 2);
-  graphics_draw_round_rect(ctx, badge, 8);
+  graphics_draw_round_rect(ctx, b, 8);
   graphics_context_set_text_color(ctx, GColorLightGray);
   graphics_draw_text(ctx, s_secs_buf, s_font_col,
-                     GRect(badge.origin.x + 1, badge.origin.y + 1, badge.size.w, badge.size.h),
+                     GRect(1, 1, b.size.w, b.size.h),
                      GTextOverflowModeFill, GTextAlignmentCenter, NULL);
 }
 
@@ -449,7 +540,7 @@ static void canvas_update(Layer *layer, GContext *ctx) {
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_rect(ctx, b, 0, GCornerNone);
 
-  draw_tick_ring(ctx, b);
+  draw_tick_ring(ctx);
 
   // Date row
   draw_date(ctx, b);
@@ -463,7 +554,8 @@ static void canvas_update(Layer *layer, GContext *ctx) {
     const int icon_w = 14;
     const int icon_gap = 6;
     const int text_gap = 9;
-    int tw = text_w(s_batt_buf, s_font_rc);
+    if (s_w_batt < 0) s_w_batt = text_w(s_batt_buf, s_font_rc);
+    int tw = s_w_batt;
     int icon_count = 1 + (s_quiet_time ? 1 : 0) + (s_charging ? 1 : 0);
     int icons_w = icon_count * icon_w + (icon_count - 1) * icon_gap;
     int total = icons_w + text_gap + tw;
@@ -494,17 +586,15 @@ static void canvas_update(Layer *layer, GContext *ctx) {
   // Big time: one centered system numeric font line for a cleaner face.
   // Colour follows the configured backlight colour.
   graphics_context_set_text_color(ctx, accent_color());
-  graphics_draw_text(ctx, s_time_buf, s_font_time, GRect(14, 62, 160, 78),
+  graphics_draw_text(ctx, s_time_buf, s_font_time, GRect(20, 62, 160, 78),
                      GTextOverflowModeFill, GTextAlignmentCenter, NULL);
 
-  // Seconds badge overlays the right edge of the time in active fixture/state.
-  draw_seconds_badge(ctx);
-
-  // Weather icon + temp (bottom-left). Bitmap is drawn at its full 60x60 size
-  // (graphics_draw_bitmap_in_rect clips instead of scaling).
+  // Weather icon + temp (bottom-left). Bitmap is drawn at its full 52x52 size
+  // (graphics_draw_bitmap_in_rect clips instead of scaling). Bottom edge kept
+  // where the old 60x60 art sat so the shrink opens a gap below the time.
   if (s_wx_icon >= 0 && s_wx_icon < ICON_COUNT && s_wx_bitmaps[s_wx_icon]) {
     graphics_context_set_compositing_mode(ctx, GCompOpSet);
-    graphics_draw_bitmap_in_rect(ctx, s_wx_bitmaps[s_wx_icon], GRect(28, 124, 60, 60));
+    graphics_draw_bitmap_in_rect(ctx, s_wx_bitmaps[s_wx_icon], GRect(32, 132, 52, 52));
   }
   graphics_context_set_text_color(ctx, GColorWhite);
   graphics_draw_text(ctx, s_temp_buf, s_font_rc, GRect(44, 178, 60, 28),
@@ -546,11 +636,20 @@ static void update_time_state(struct tm *t) {
   snprintf(s_time_buf, sizeof(s_time_buf), "%s:%s", s_hh_buf, s_mm_buf);
   strftime(s_secs_buf, sizeof(s_secs_buf), "%S", t);
 
-  strftime(s_wday_buf, sizeof(s_wday_buf), "%A", t);
-  strftime(s_mon_buf, sizeof(s_mon_buf), "%B", t);
-  for (char *p = s_wday_buf; *p; p++) *p = toupper((int)*p);
-  for (char *p = s_mon_buf; *p; p++) *p = toupper((int)*p);
-  snprintf(s_mday_buf, sizeof(s_mday_buf), "%d", t->tm_mday);
+  // Date row only changes at day rollover — skip the strftime + uppercase
+  // passes (and text re-measurement) on every other tick.
+  static int last_mday = -1;
+  static int last_mon = -1;
+  if (t->tm_mday != last_mday || t->tm_mon != last_mon) {
+    last_mday = t->tm_mday;
+    last_mon = t->tm_mon;
+    strftime(s_wday_buf, sizeof(s_wday_buf), "%A", t);
+    strftime(s_mon_buf, sizeof(s_mon_buf), "%B", t);
+    for (char *p = s_wday_buf; *p; p++) *p = toupper((int)*p);
+    for (char *p = s_mon_buf; *p; p++) *p = toupper((int)*p);
+    snprintf(s_mday_buf, sizeof(s_mday_buf), "%d", t->tm_mday);
+    s_w_wday = s_w_mday = s_w_mon = -1;
+  }
 }
 
 // ---- Battery life estimator (ported from pebble-inimal) ----
@@ -682,6 +781,7 @@ static void battery_since_last_charge_format(char *buf, size_t n) {
 static void update_battery(BatteryChargeState st) {
   bool was_powered = s_charging;
   bool is_powered = st.is_charging || st.is_plugged;
+  int prev_pct = s_batt_pct;
 
   battery_estimator_update(st);
   s_batt_pct = st.charge_percent;
@@ -694,14 +794,20 @@ static void update_battery(BatteryChargeState st) {
   if (was_powered != is_powered) {
     persist_write_bool(PKEY_BAT_POWERED, is_powered);
   }
+  // Repeated events with identical state don't need a reformat or redraw.
+  bool changed = (s_batt_buf[0] == '\0') || (s_batt_pct != prev_pct) ||
+                 (is_powered != was_powered);
   s_charging = is_powered;
+  if (!changed) return;
   snprintf(s_batt_buf, sizeof(s_batt_buf), "%d %%", s_batt_pct);
+  s_w_batt = -1;
   if (s_canvas) layer_mark_dirty(s_canvas);
 }
 
 static void update_connection(bool connected) {
+  if (connected == s_connected) return;  // repeated event, no change
   s_connected = connected;
-  layer_mark_dirty(s_canvas);
+  if (s_canvas) layer_mark_dirty(s_canvas);
 }
 
 // Quiet Time has no subscription API — poll on ticks and taps and redraw
@@ -735,7 +841,14 @@ static int health_goal(HealthMetric metric, int fallback) {
   return fallback;
 }
 
-static void update_health(void) {
+// Goal queries use the expensive *averaged* aggregate API, so they run only
+// at init and on HealthEventSignificantUpdate (day rollover), not per event.
+static void update_health_goals(void) {
+  s_step_goal = health_goal(HealthMetricStepCount, FALLBACK_STEP_GOAL);
+  s_dist_goal = health_goal(HealthMetricWalkedDistanceMeters, FALLBACK_DIST_GOAL);
+}
+
+static void update_health_movement(void) {
   time_t start = time_start_of_today();
   time_t now = time(NULL);
 
@@ -747,19 +860,26 @@ static void update_health(void) {
       & HealthServiceAccessibilityMaskAvailable) {
     s_dist_m = (int)health_service_sum_today(HealthMetricWalkedDistanceMeters);
   }
+
+  snprintf(s_steps_buf, sizeof(s_steps_buf), "%d", s_steps);
+  int km_whole = s_dist_m / 1000;
+  int km_frac = (s_dist_m % 1000) / 10;
+  snprintf(s_dist_buf, sizeof(s_dist_buf), "%d.%02d km", km_whole, km_frac);
+}
+
+static void update_health_hr(void) {
+  time_t now = time(NULL);
   if (health_service_metric_accessible(HealthMetricHeartRateBPM, now - 60, now)
       & HealthServiceAccessibilityMaskAvailable) {
     s_hr = (int)health_service_peek_current_value(HealthMetricHeartRateBPM);
   }
-
-  s_step_goal = health_goal(HealthMetricStepCount, FALLBACK_STEP_GOAL);
-  s_dist_goal = health_goal(HealthMetricWalkedDistanceMeters, FALLBACK_DIST_GOAL);
-
-  snprintf(s_steps_buf, sizeof(s_steps_buf), "%d", s_steps);
   snprintf(s_hr_buf, sizeof(s_hr_buf), "%d", s_hr);
-  int km_whole = s_dist_m / 1000;
-  int km_frac = (s_dist_m % 1000) / 10;
-  snprintf(s_dist_buf, sizeof(s_dist_buf), "%d.%02d km", km_whole, km_frac);
+}
+
+static void update_health(void) {
+  update_health_movement();
+  update_health_hr();
+  update_health_goals();
 }
 
 static void health_handler(HealthEventType type, void *ctx) {
@@ -768,8 +888,39 @@ static void health_handler(HealthEventType type, void *ctx) {
   time_t now_t = time(NULL);
   struct tm *now = localtime(&now_t);
   if (now && is_night_idle(now)) return;
-  update_health();
-  layer_mark_dirty(s_canvas);
+
+  char prev_steps[sizeof(s_steps_buf)];
+  char prev_dist[sizeof(s_dist_buf)];
+  char prev_hr[sizeof(s_hr_buf)];
+  int prev_step_goal = s_step_goal;
+  int prev_dist_goal = s_dist_goal;
+  strcpy(prev_steps, s_steps_buf);
+  strcpy(prev_dist, s_dist_buf);
+  strcpy(prev_hr, s_hr_buf);
+
+  // Query only what the event actually changed.
+  switch (type) {
+    case HealthEventSignificantUpdate:
+      update_health();
+      break;
+    case HealthEventMovementUpdate:
+      update_health_movement();
+      break;
+    case HealthEventHeartRateUpdate:
+      update_health_hr();
+      break;
+    default:  // sleep and future event types don't touch displayed stats
+      return;
+  }
+
+  // Redraw only when a displayed value (or a gauge goal) actually changed.
+  if (strcmp(prev_steps, s_steps_buf) != 0 ||
+      strcmp(prev_dist, s_dist_buf) != 0 ||
+      strcmp(prev_hr, s_hr_buf) != 0 ||
+      prev_step_goal != s_step_goal ||
+      prev_dist_goal != s_dist_goal) {
+    layer_mark_dirty(s_canvas);
+  }
 }
 #else
 static void update_health(void) {
@@ -817,8 +968,16 @@ static void tick_handler(struct tm *t, TimeUnits units) {
     return;
   }
 
+  // Seconds-only tick (active badge, same minute): repaint just the badge.
+  if (s_active && !(units & MINUTE_UNIT)) {
+    strftime(s_secs_buf, sizeof(s_secs_buf), "%S", t);
+    layer_mark_dirty(s_badge_layer);
+    return;
+  }
+
   update_time_state(t);
   layer_mark_dirty(s_canvas);
+  if (s_active) layer_mark_dirty(s_badge_layer);
 
   if (units & MINUTE_UNIT) {
     // Time-based weather refresh: respects the user-configured interval and
@@ -844,7 +1003,7 @@ static void go_passive(void *data) {
   s_active = false;
   s_active_timer = NULL;
   tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
-  layer_mark_dirty(s_canvas);
+  layer_set_hidden(s_badge_layer, true);
 }
 
 static void go_active(void) {
@@ -855,6 +1014,9 @@ static void go_active(void) {
   // refresh seconds immediately
   time_t now = time(NULL);
   update_time_state(localtime(&now));
+  layer_set_hidden(s_badge_layer, false);
+  layer_mark_dirty(s_badge_layer);
+  // Full-face refresh too: the time may be stale after a night-idle gap.
   layer_mark_dirty(s_canvas);
 }
 
@@ -938,6 +1100,7 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
     if (v >= 0 && v < BacklightColorCount) {
       s_backlight_color = (BacklightColor)v;
       persist_write_int(PKEY_BACKLIGHT_COLOR, (int)s_backlight_color);
+      refresh_accent_color();
       apply_backlight_color();
       APP_LOG(APP_LOG_LEVEL_INFO, "Backlight colour: %d", v);
     }
@@ -1054,14 +1217,31 @@ static void window_load(Window *window) {
   s_wx_bitmaps[ICON_THUNDER] = gbitmap_create_with_resource(RESOURCE_ID_WX_THUNDER);
   s_wx_bitmaps[ICON_FOG]     = gbitmap_create_with_resource(RESOURCE_ID_WX_FOG);
   s_status_bt_off = gbitmap_create_with_resource(RESOURCE_ID_STATUS_BT_OFF);
+  tint_bt_off_bitmap();
+
+  compute_tick_ring(b);
+
+  s_path_bolt  = gpath_create(&BOLT_PATH_INFO);
+  s_path_pin   = gpath_create(&PIN_PATH_INFO);
+  s_path_heart = gpath_create(&HEART_PATH_INFO);
 
   s_canvas = layer_create(b);
   layer_set_update_proc(s_canvas, canvas_update);
   layer_add_child(root, s_canvas);
+
+  apply_visual_fixture();  // no-op unless a fixture build; sets s_active
+  s_badge_layer = layer_create(BADGE_FRAME);
+  layer_set_update_proc(s_badge_layer, badge_update);
+  layer_set_hidden(s_badge_layer, !s_active);
+  layer_add_child(root, s_badge_layer);
 }
 
 static void window_unload(Window *window) {
+  layer_destroy(s_badge_layer);
   layer_destroy(s_canvas);
+  gpath_destroy(s_path_bolt);
+  gpath_destroy(s_path_pin);
+  gpath_destroy(s_path_heart);
   for (int i = 0; i < ICON_COUNT; i++) {
     if (s_wx_bitmaps[i]) gbitmap_destroy(s_wx_bitmaps[i]);
   }
@@ -1074,6 +1254,7 @@ static void window_unload(Window *window) {
 
 static void init(void) {
   load_persisted();
+  refresh_accent_color();
 
   // Treat startup as a recent "tap" so we don't immediately enter night-idle
   // (e.g., during a watch reboot at 3am).
@@ -1108,7 +1289,10 @@ static void init(void) {
   accel_tap_service_subscribe(tap_handler);
 
   app_message_register_inbox_received(inbox_received);
-  app_message_open(app_message_inbox_size_maximum(), app_message_outbox_size_maximum());
+  // Largest inbound dict is the ~8-tuple settings push; largest outbound is
+  // the battery-info reply (two short cstrings + an int32). Sizing the
+  // buffers for that instead of *_size_maximum() saves ~8 KB of heap.
+  app_message_open(256, 256);
 }
 
 static void deinit(void) {

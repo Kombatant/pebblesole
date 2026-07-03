@@ -89,9 +89,11 @@ function locationError(err) {
 }
 
 function refresh() {
+  // Weather doesn't need a minute-fresh position; accepting a cached fix up
+  // to 30 min old avoids waking the phone's location hardware every fetch.
   navigator.geolocation.getCurrentPosition(locationSuccess, locationError, {
     timeout: 15000,
-    maximumAge: 60000
+    maximumAge: 30 * 60 * 1000
   });
 }
 
